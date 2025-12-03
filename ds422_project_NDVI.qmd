@@ -1,0 +1,463 @@
+---
+title: "ds422_project_NDVI"
+format: html
+editor: visual
+---
+
+### Load Libraries
+
+```{r}
+# Spatial data and raster handling
+library(here)       # Project-friendly file paths
+library(terra)      # Raster data
+library(sf)         # Vector data
+library(mapview)    # Quick spatial visualization
+library(tigris)     # US county shapefiles
+library(dplyr)
+library(RColorBrewer)
+
+options(tigris_use_cache = TRUE)
+
+# Visualization
+library(ggplot2)
+library(viridis)
+```
+
+### Load and prepare polygons
+
+```{r}
+# Load Maui districts shapefile
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+```
+
+### Load Sentinel-2 (Copernicus) Imagery
+
+```{r}
+aug8_B04 <- rast("copernicus/8-08-2023/T04QGJ_20230808T210929_B04_20m.jp2")
+aug8_B8A <- rast("copernicus/8-08-2023/T04QGJ_20230808T210929_B8A_20m.jp2")
+
+aug13_B04 <- rast("copernicus/8-13-2023/T04QGJ_20230813T210931_B04_20m.jp2")
+aug13_B8A <- rast("copernicus/8-13-2023/T04QGJ_20230813T210931_B8A_20m.jp2")
+```
+
+### Compute NDVI
+
+```{r}
+ndvi_aug8  <- (aug8_B8A - aug8_B04)   / (aug8_B8A + aug8_B04)
+ndvi_aug13 <- (aug13_B8A - aug13_B04) / (aug13_B8A + aug13_B04)
+
+ndvi_diff <- ndvi_aug13 - ndvi_aug8
+```
+
+### Crop for Maui Island Only
+
+```{r}
+hi_counties <- counties(state = "HI", cb = TRUE, class = "sf")
+maui <- hi_counties[hi_counties$NAME == "Maui", ]
+
+# Transform to NDVI CRS
+maui_utm <- st_transform(maui, crs(ndvi_aug8))
+maui_vect <- vect(maui_utm)
+
+# Crop + mask
+ndvi_aug8_maui  <- mask(crop(ndvi_aug8,  maui_vect), maui_vect)
+ndvi_aug13_maui <- mask(crop(ndvi_aug13, maui_vect), maui_vect)
+ndvi_diff_maui  <- mask(crop(ndvi_diff,  maui_vect), maui_vect)
+```
+
+### Crop for Zoomed-in Maui Visualization
+
+```{r}
+maui_only_ext <- ext(734500, 819500, 2281500, 2328500)
+
+ndvi_aug8_maui_only  <- crop(ndvi_aug8_maui,  maui_only_ext)
+ndvi_aug13_maui_only <- crop(ndvi_aug13_maui, maui_only_ext)
+ndvi_diff_maui_only  <- crop(ndvi_diff_maui,  maui_only_ext)
+```
+
+### Visualize NDVI
+
+```{r}
+plot(ndvi_aug8_maui_only,  main = "NDVI — Aug 8 (Maui Only)")
+plot(ndvi_aug13_maui_only, main = "NDVI — Aug 13 (Maui Only)")
+plot(ndvi_diff_maui_only,  main = "NDVI Change (Aug 13 - Aug 8)")
+```
+
+### NDVI Maps with All Maui Districts Overlaid
+
+```{r}
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+
+# Pre-fire NDVI (August 8) with districts
+plot(ndvi_aug8_maui_only, main = "NDVI — August 8 (Pre-Fire)", col = viridis::viridis(100))
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+
+# Post-fire NDVI (August 13) with districts
+plot(ndvi_aug13_maui_only, main = "NDVI — August 13 (Post-Fire)", col = viridis::viridis(100))
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+
+# NDVI difference with districts
+plot(ndvi_diff_maui_only, main = "NDVI Change (Aug 13 - Aug 8)", col = viridis::viridis(100))
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+```
+
+### NDVI Maps Zoomed to Lahaina and Upcountry Districts Only
+
+```{r}
+# Subset polygons
+lahaina_poly <- maui_districts[maui_districts$district %in% c("West Maui Residency Area"), ]
+upcountry_poly <- maui_districts[maui_districts$district %in% c("Upcountry (Pukalani-Kula-Ulupalakua) Residency Area"), ]
+
+# Transform CRS to match NDVI raster
+lahaina_poly_utm   <- st_transform(lahaina_poly, crs(ndvi_aug8_maui_only))
+upcountry_poly_utm <- st_transform(upcountry_poly, crs(ndvi_aug8_maui_only))
+
+# Fix invalid geometries
+lahaina_poly_utm <- st_make_valid(lahaina_poly_utm)
+upcountry_poly_utm <- st_make_valid(upcountry_poly_utm)
+
+# Convert to SpatVector
+lahaina_vect   <- vect(lahaina_poly_utm)
+upcountry_vect <- vect(upcountry_poly_utm)
+
+# Quick visual check — red/blue overlay
+plot(ndvi_aug8_maui_only, main="NDVI Maui with Districts Overlay")
+plot(lahaina_vect, add=TRUE, border="red", lwd=2)
+plot(upcountry_vect, add=TRUE, border="blue", lwd=2)
+
+# Crop and mask NDVI
+ndvi_aug8_lahaina   <- crop(ndvi_aug8_maui_only, lahaina_vect) |> mask(lahaina_vect)
+ndvi_aug13_lahaina  <- crop(ndvi_aug13_maui_only, lahaina_vect) |> mask(lahaina_vect)
+ndvi_diff_lahaina   <- ndvi_aug13_lahaina - ndvi_aug8_lahaina
+
+ndvi_aug8_upcountry   <- crop(ndvi_aug8_maui_only, upcountry_vect) |> mask(upcountry_vect)
+ndvi_aug13_upcountry  <- crop(ndvi_aug13_maui_only, upcountry_vect) |> mask(upcountry_vect)
+ndvi_diff_upcountry   <- ndvi_aug13_upcountry - ndvi_aug8_upcountry
+
+# Plot NDVI layers — Lahaina
+plot(ndvi_aug8_lahaina, main="Lahaina: Aug 8 (Pre-Fire)", col=viridis(100))
+plot(lahaina_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_aug13_lahaina, main="Lahaina: Aug 13 (Post-Fire)", col=viridis(100))
+plot(lahaina_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_diff_lahaina, main="Lahaina: NDVI Change", col=viridis(100))
+plot(lahaina_vect, add=TRUE, border="black", lwd=1)
+
+# Plot NDVI layers — Upcountry
+plot(ndvi_aug8_upcountry, main="Upcountry: Aug 8 (Pre-Fire)", col=viridis(100))
+plot(upcountry_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_aug13_upcountry, main="Upcountry: Aug 13 (Post-Fire)", col=viridis(100))
+plot(upcountry_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_diff_upcountry, main="Upcountry: NDVI Change", col=viridis(100))
+plot(upcountry_vect, add=TRUE, border="black", lwd=1)
+```
+
+### Compute Mean NDVI
+
+```{r}
+vals8  <- values(ndvi_aug8_maui_only,  na.rm = TRUE)
+vals13 <- values(ndvi_aug13_maui_only, na.rm = TRUE)
+
+# Pixel-by-pixel NDVI change
+ndvi_change <- vals13 - vals8
+
+total_ndvi_pre  <- sum(vals8,  na.rm = TRUE)
+total_ndvi_post <- sum(vals13, na.rm = TRUE)
+total_ndvi_diff <- sum(ndvi_change, na.rm = TRUE)
+
+total_ndvi_pre
+total_ndvi_post
+total_ndvi_diff   # This will be negative (loss)
+
+```
+
+### Plot Average NDVI \[!\] TBD \[!\]
+
+```{r}
+df <- data.frame(
+  type = c("Total NDVI Pre-Fire", "Total NDVI Post-Fire", "Total NDVI Change"),
+  value = c(total_ndvi_pre, total_ndvi_post, total_ndvi_diff)
+)
+
+ggplot(df, aes(x = type, y = value, fill = type)) +
+  geom_col() +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Total NDVI Change (Maui Fire Area)",
+    y = "Total NDVI (Sum of all pixels)",
+    x = ""
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+copernicus_path <- "copernicus"
+
+aug8_B04 <- rast(file.path(copernicus_path, "8-08-2023/T04QGJ_20230808T210929_B04_20m.jp2"))
+aug8_B8A <- rast(file.path(copernicus_path, "8-08-2023/T04QGJ_20230808T210929_B8A_20m.jp2"))
+
+aug13_B04 <- rast(file.path(copernicus_path, "8-13-2023/T04QGJ_20230813T210931_B04_20m.jp2"))
+aug13_B8A <- rast(file.path(copernicus_path, "8-13-2023/T04QGJ_20230813T210931_B8A_20m.jp2"))
+
+ndvi_aug8  <- (aug8_B8A  - aug8_B04)  / (aug8_B8A  + aug8_B04)
+ndvi_aug13 <- (aug13_B8A - aug13_B04) / (aug13_B8A + aug13_B04)
+
+ndvi_diff <- ndvi_aug13 - ndvi_aug8
+
+lahaina_utm   <- st_transform(lahaina_poly,   crs(ndvi_aug8))
+upcountry_utm <- st_transform(upcountry_poly, crs(ndvi_aug8))
+
+lahaina_vect   <- vect(lahaina_utm)
+upcountry_vect <- vect(upcountry_utm)
+
+ndvi8_lahaina  <- mask(crop(ndvi_aug8,  lahaina_vect), lahaina_vect)
+ndvi13_lahaina <- mask(crop(ndvi_aug13, lahaina_vect), lahaina_vect)
+
+ndvi_diff_lahaina <- ndvi13_lahaina - ndvi8_lahaina
+
+ndvi8_upcountry  <- mask(crop(ndvi_aug8,  upcountry_vect), upcountry_vect)
+ndvi13_upcountry <- mask(crop(ndvi_aug13, upcountry_vect), upcountry_vect)
+
+ndvi_diff_upcountry <- ndvi13_upcountry - ndvi8_upcountry
+
+vals8_L  <- values(ndvi8_lahaina,  na.rm = TRUE)
+vals13_L <- values(ndvi13_lahaina, na.rm = TRUE)
+diff_L   <- vals13_L - vals8_L
+
+total_L <- sum(diff_L, na.rm = TRUE)
+total_L
+
+vals8_U  <- values(ndvi8_upcountry,  na.rm = TRUE)
+vals13_U <- values(ndvi13_upcountry, na.rm = TRUE)
+diff_U   <- vals13_U - vals8_U
+
+total_U <- sum(diff_U, na.rm = TRUE)
+total_U
+
+df <- data.frame(
+  Area = c("Lahaina", "Upcountry"),
+  NDVI_Change = c(total_L, total_U)
+)
+
+ggplot(df, aes(x = Area, y = NDVI_Change, fill = Area)) +
+  geom_col() +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Total NDVI Change After Fire",
+    y = "Total NDVI (Sum of ΔNDVI Pixels)",
+    x = ""
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+# Load shapefile
+lulc <- st_read("Land_Use_Land_Cover_(LULC)/Land_Use_Land_Cover_(LULC).shp")
+
+# See column names
+names(lulc)
+
+# Optional: inspect first few rows
+head(lulc)
+```
+
+```{r}
+lulc <- st_read("Land_Use_Land_Cover_(LULC)/Land_Use_Land_Cover_(LULC).shp")
+
+# Transform to NDVI raster CRS
+lulc_utm <- st_transform(lulc, crs(ndvi_diff))
+lulc_vect <- vect(lulc_utm)
+
+# Crop LULC and NDVI difference to districts
+lulc_lahaina   <- crop(lulc_vect, lahaina_vect) |> mask(lahaina_vect)
+lulc_upcountry <- crop(lulc_vect, upcountry_vect) |> mask(upcountry_vect)
+
+ndvi_diff_lahaina   <- crop(ndvi_diff, lahaina_vect) |> mask(lahaina_vect)
+ndvi_diff_upcountry <- crop(ndvi_diff, upcountry_vect) |> mask(upcountry_vect)
+
+# Extract NDVI sums by landcover
+ext_L <- terra::extract(ndvi_diff_lahaina, lulc_lahaina, fun = sum, na.rm = TRUE)
+ext_U <- terra::extract(ndvi_diff_upcountry, lulc_upcountry, fun = sum, na.rm = TRUE)
+
+# Add landcover codes
+ext_L$landcover <- lulc_lahaina$landcover
+ext_U$landcover <- lulc_upcountry$landcover
+
+# Rename NDVI sum column
+names(ext_L)[2] <- "NDVI_sum"
+names(ext_U)[2] <- "NDVI_sum"
+
+# Create a landcover lookup table
+landcover_lookup <- data.frame(
+  code = c(0, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 31, 32, 33, 42, 51, 52, 53, 54, 61, 62, 72, 73, 74, 75, 76, 77),
+  land_type = c(
+    "Unknown", "Water", "Barren", "Shrubland", "Grassland", "Wetlands", "Agriculture", "Forest",
+    "Urban", "Industrial", "Airport", "Mining", "Orchard", "Pasture", "Forest_noFog", "Developed",
+    "OpenSpace", "Mangrove", "Beach", "Savanna", "WetlandForest", "MixedForest", "DenseForest",
+    "AgriculturePlantation", "Other", "Other2", "Other3", "Other4"
+  )
+)
+
+# Summarize total NDVI change by landcover
+ndvi_by_land_L <- ext_L %>%
+  group_by(landcover) %>%
+  summarise(NDVI_change = sum(NDVI_sum, na.rm = TRUE)) %>%
+  mutate(land_type = landcover_lookup$land_type[match(landcover, landcover_lookup$code)])
+
+ndvi_by_land_U <- ext_U %>%
+  group_by(landcover) %>%
+  summarise(NDVI_change = sum(NDVI_sum, na.rm = TRUE)) %>%
+  mutate(land_type = landcover_lookup$land_type[match(landcover, landcover_lookup$code)])
+
+# Plot NDVI change for Lahaina with values on bars
+ggplot(ndvi_by_land_L, aes(x = land_type, y = NDVI_change, fill = land_type)) +
+  geom_col() +
+  geom_text(aes(label = round(NDVI_change, 1)), vjust = -0.5, size = 3) +
+  scale_fill_viridis_d() +
+  labs(title = "Lahaina NDVI Change by Land Type",
+       x = "Land Type", y = "Sum of ΔNDVI") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot NDVI change for Upcountry with values on bars
+ggplot(ndvi_by_land_U, aes(x = land_type, y = NDVI_change, fill = land_type)) +
+  geom_col() +
+  geom_text(aes(label = round(NDVI_change, 1)), vjust = -0.5, size = 3) +
+  scale_fill_viridis_d() +
+  labs(title = "Upcountry NDVI Change by Land Type",
+       x = "Land Type", y = "Sum of ΔNDVI") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Combine Lahaina and Upcountry for plotting
+ndvi_by_land_L$Area <- "Lahaina"
+ndvi_by_land_U$Area <- "Upcountry"
+
+ndvi_land_df <- rbind(ndvi_by_land_L, ndvi_by_land_U)
+
+# Custom colors for districts
+district_colors <- c("Lahaina" = "red", "Upcountry" = "blue")
+
+# Grouped bar chart with numbers and better colors
+ggplot(ndvi_land_df, aes(x = land_type, y = NDVI_change, fill = Area)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = round(NDVI_change, 1)), 
+            position = position_dodge(width = 0.8), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = district_colors) +
+  labs(title = "NDVI Change by Land Type: Lahaina vs Upcountry",
+       x = "Land Type", y = "Sum of ΔNDVI") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+### NDVI Distribution
+
+```         
+```
+
+### Load Maui Districts & Land Cover Data
+
+```{r}
+# Maui districts
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+# Land cover
+landcover <- st_read("Maui_land_cover_map_2017_v1.2_Shapefile/Maui_land_cover_map_2017_v1.2_Shapefile.shp")
+landcover_utm <- st_transform(landcover, crs(ndvi_aug8_maui_only))
+landcover_vect <- vect(landcover_utm)
+```
+
+### NDVI by Area (Lahaina vs Upcountry)
+
+```{r}
+# Select districts
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district == "West Maui Residency Area", ]
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district == "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+# Convert to SpatVector
+lahaina_vect <- vect(lahaina_poly)
+upcountry_vect <- vect(upcountry_poly)
+
+# Crop & mask
+ndvi_aug8_lahaina   <- crop(ndvi_aug8_maui_only, lahaina_vect) |> mask(lahaina_vect)
+ndvi_aug13_lahaina  <- crop(ndvi_aug13_maui_only, lahaina_vect) |> mask(lahaina_vect)
+
+ndvi_aug8_upcountry   <- crop(ndvi_aug8_maui_only, upcountry_vect) |> mask(upcountry_vect)
+ndvi_aug13_upcountry  <- crop(ndvi_aug13_maui_only, upcountry_vect) |> mask(upcountry_vect)
+
+# NDVI difference
+ndvi_diff_lahaina   <- ndvi_aug13_lahaina - ndvi_aug8_lahaina
+ndvi_diff_upcountry <- ndvi_aug13_upcountry - ndvi_aug8_upcountry
+
+# Mean NDVI change
+mean_ndvi_lahaina   <- global(ndvi_diff_lahaina, stat = "mean", na.rm = TRUE)
+mean_ndvi_upcountry <- global(ndvi_diff_upcountry, stat = "mean", na.rm = TRUE)
+
+ndvi_summary <- data.frame(
+  Area = c("Lahaina", "Upcountry"),
+  Mean_NDVI_Change = c(mean_ndvi_lahaina[,1], mean_ndvi_upcountry[,1])
+)
+
+ndvi_summary
+```
+
+### NDVI Change by Land Cover Type
+
+```{r}
+# Intersect landcover with each area
+lc_lahaina <- st_intersection(landcover_utm, lahaina_poly)
+lc_upcountry <- st_intersection(landcover_utm, upcountry_poly)
+
+lc_lahaina_vect <- vect(lc_lahaina)
+lc_upcountry_vect <- vect(lc_upcountry)
+
+# Function to compute mean NDVI by land-cover
+mean_ndvi_by_lc <- function(ndvi_raster, lc_vect) {
+  classes <- unique(lc_vect$LC_2017)
+  sapply(classes, function(cl) {
+    zone <- lc_vect[lc_vect$LC_2017 == cl, ]
+    vals <- values(mask(crop(ndvi_raster, zone), zone), na.rm = TRUE)
+    mean(vals)
+  })
+}
+
+# Compute per area
+mean_ndvi_lahaina_lc <- mean_ndvi_by_lc(ndvi_diff_maui, lc_lahaina_vect)
+mean_ndvi_upcountry_lc <- mean_ndvi_by_lc(ndvi_diff_maui, lc_upcountry_vect)
+
+# Combine into data frame
+df_lahaina <- data.frame(
+  Area = "Lahaina",
+  LandCover = names(mean_ndvi_lahaina_lc),
+  Mean_NDVI_Change = mean_ndvi_lahaina_lc
+)
+
+df_upcountry <- data.frame(
+  Area = "Upcountry",
+  LandCover = names(mean_ndvi_upcountry_lc),
+  Mean_NDVI_Change = mean_ndvi_upcountry_lc
+)
+
+ndvi_lc_summary <- rbind(df_lahaina, df_upcountry)
+ndvi_lc_summary
+```
+
+### Visualize NDVI Change by Land Cover
+
+```{r}
+ggplot(ndvi_lc_summary, aes(x = LandCover, y = Mean_NDVI_Change, fill = Area)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(title = "Mean NDVI Change by Land-Cover Type in Lahaina vs Upcountry",
+       x = "Land-Cover Type",
+       y = "Mean NDVI Change") +
+  theme_minimal() +
+  scale_fill_viridis_d(option = "plasma")
+```
