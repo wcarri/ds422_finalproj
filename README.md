@@ -36,3 +36,5 @@ The project uses **RStudio**, leveraging packages such as `sf`, `terra`, `ggp
 -   2023-08-10
 
 **District boundaries** of thecounty of Maui district shapefile, transformed to match raster CRS.
+
+Note: Satellite data could not be uploaded.
