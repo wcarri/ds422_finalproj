@@ -1,0 +1,682 @@
+---
+title: "project"
+format: html
+editor: visual
+---
+
+```{r}
+library(here)     
+library(terra)    
+library(sf)       
+library(mapview)    
+library(tigris)   
+library(dplyr)
+library(RColorBrewer)
+library(ggplot2)
+library(viridis)
+library(leaflet)
+library(tidyverse)
+library(gganimate)
+library(tidyterra)
+
+options(tigris_use_cache = TRUE)
+
+```
+
+```{r}
+modis <- st_read("nasaearth/modis/DL_FIRE_M-C61_688797/fire_archive_M-C61_688797.shp") %>%
+  mutate(CONFIDENCE = as.character(CONFIDENCE))
+
+s_npp <- st_read("nasaearth/viirs/DL_FIRE_SV-C2_688800/fire_archive_SV-C2_688800.shp") %>%
+  mutate(CONFIDENCE = as.character(CONFIDENCE))
+
+noaa20 <- st_read("nasaearth/viirs/DL_FIRE_J1V-C2_688798/fire_archive_J1V-C2_688798.shp") %>%
+  mutate(CONFIDENCE = as.character(CONFIDENCE))
+
+```
+
+```{r}
+modis <- modis %>% mutate(CONFIDENCE = as.character(CONFIDENCE))
+s_npp <- s_npp %>% mutate(CONFIDENCE = as.character(CONFIDENCE))
+noaa20 <- noaa20 %>% mutate(CONFIDENCE = as.character(CONFIDENCE))
+```
+
+```{r}
+fires <- bind_rows(modis %>% mutate(sensor = "MODIS"),s_npp %>% mutate(sensor = "VIIRS S-NPP"),noaa20 %>% mutate(sensor = "VIIRS NOAA-20"))
+```
+
+```{r}
+unique(fires$ACQ_DATE)
+```
+
+```{r, message=FALSE}
+library(tigris)
+options(tigris_use_cache = TRUE)
+
+states <- states(cb = TRUE, year = 2022)
+
+hawaii <- states %>% 
+  dplyr::filter(NAME == "Hawaii")
+```
+
+```{r}
+states <- states(cb = TRUE)
+hawaii <- states %>% filter(NAME == "Hawaii")
+```
+
+```{r}
+## day 1
+day1 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-08"))
+ggplot() +
+  geom_sf(data = hawaii, fill = NA, color = "black") +
+  geom_sf(data = day1, color = "red", size = 1, alpha = 0.8) +
+  coord_sf(xlim = c(-156.8, -155.9), ylim = c(20.4, 21.0)) +
+  theme_minimal() +
+  labs(title = "FIRMS Fire Detections on Maui: 2023-08-08")
+
+## day 2
+day2 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-09"))
+ggplot() +
+  geom_sf(data = hawaii, fill = NA, color = "black") +
+  geom_sf(data = day2, color = "red", size = 1, alpha = 0.8) +
+  coord_sf(xlim = c(-156.8, -155.9), ylim = c(20.4, 21.0)) +
+  theme_minimal() +
+  labs(title = "FIRMS Fire Detections on Maui: 2023-08-09")
+
+## day 3
+day3 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-10"))
+ggplot() +
+  geom_sf(data = hawaii, fill = NA, color = "black") +
+  geom_sf(data = day3, color = "red", size = 1, alpha = 0.8) +
+  coord_sf(xlim = c(-156.8, -155.9), ylim = c(20.4, 21.0)) +
+  theme_minimal() +
+  labs(title = "FIRMS Fire Detections on Maui: 2023-08-10")
+
+```
+
+### Animation
+
+```{r}
+fires_subset <- fires %>%
+  filter(LONGITUDE >= -156.8, LONGITUDE <= -155.9,
+         LATITUDE  >= 20.4, LATITUDE  <= 21.0,
+         (as.numeric(CONFIDENCE) >= 50 | CONFIDENCE %in% c("h", "n"))) %>%
+  st_drop_geometry()
+
+hi_counties <- counties(state = "HI", cb = TRUE, class = "sf")
+maui <- hi_counties[hi_counties$NAME == "Maui", ]
+
+p <- ggplot() +
+  geom_sf(data = maui, fill = NA, color = "black") +
+  geom_point(
+    data = fires_subset,
+    aes(x = LONGITUDE, y = LATITUDE),
+    color = "red",     # 🔥 all points same color
+    size = 2,
+    alpha = 0.8
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Maui Wildfire Progression: {frame_time}",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  transition_time(ACQ_DATE) +               # timeline
+  shadow_mark(past = TRUE, alpha = 0.3) +   # 🔥 fade-in cumulative trail
+  ease_aes("linear")                        # smooth animation
+
+animation <- gganimate::animate(
+  p,
+  nframes = length(unique(fires_subset$ACQ_DATE)) * 10,
+  fps = 4
+)
+
+animation
+```
+
+### Load Sentinel-2 (Copernicus) Imagery
+
+```{r}
+aug8_B04 <- rast("copernicus/8-08-2023/T04QGJ_20230808T210929_B04_20m.jp2")
+aug8_B8A <- rast("copernicus/8-08-2023/T04QGJ_20230808T210929_B8A_20m.jp2")
+
+aug13_B04 <- rast("copernicus/8-13-2023/T04QGJ_20230813T210931_B04_20m.jp2")
+aug13_B8A <- rast("copernicus/8-13-2023/T04QGJ_20230813T210931_B8A_20m.jp2")
+```
+
+```{r}
+ndvi_aug8  <- (aug8_B8A - aug8_B04)   / (aug8_B8A + aug8_B04)
+ndvi_aug13 <- (aug13_B8A - aug13_B04) / (aug13_B8A + aug13_B04)
+
+ndvi_diff <- ndvi_aug13 - ndvi_aug8
+```
+
+### Crop for Maui Island Only
+
+```{r}
+# transform to NDVI CRS
+maui_utm <- st_transform(maui, crs(ndvi_aug8))
+maui_vect <- vect(maui_utm)
+
+# crop + mask
+ndvi_aug8_maui  <- mask(crop(ndvi_aug8,  maui_vect), maui_vect)
+ndvi_aug13_maui <- mask(crop(ndvi_aug13, maui_vect), maui_vect)
+ndvi_diff_maui  <- mask(crop(ndvi_diff,  maui_vect), maui_vect)
+```
+
+### Crop for Zoomed-in Maui Visualization
+
+```{r}
+maui_only_ext <- ext(734500, 819500, 2281500, 2328500)
+
+ndvi_aug8_maui_only  <- crop(ndvi_aug8_maui,  maui_only_ext)
+ndvi_aug13_maui_only <- crop(ndvi_aug13_maui, maui_only_ext)
+ndvi_diff_maui_only  <- crop(ndvi_diff_maui,  maui_only_ext)
+```
+
+```{r}
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+
+# pre-fire NDVI (August 8) with districts
+plot(ndvi_aug8_maui_only, main = "NDVI — August 8 (Pre-Fire)", col = viridis::viridis(100))
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+
+# Post-fire NDVI (August 13) with districts
+plot(ndvi_aug13_maui_only, main = "NDVI — August 13 (Post-Fire)", col = viridis::viridis(100))
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+```
+
+```{r}
+fires_08 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-08"))
+
+fires_08_utm <- fires_08 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug8_maui_only))
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+plot(ndvi_aug8_maui_only,
+     main = "NDVI — August 8 (Pre-Fire) with Fire Detections and Districts",
+     col = viridis::viridis(100))
+
+# overlay districts
+plot(st_geometry(maui_districts_utm),
+     add = TRUE,
+     border = "black",
+     lwd = 1)
+
+# overlay fire points
+plot(st_geometry(fires_08_utm),
+     add = TRUE,
+     col = "red",
+     pch = 16,
+     cex = 0.7)
+
+fires_10 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-10"))
+
+fires_10_utm <- fires_10 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug13_maui_only))
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug13_maui_only))
+
+plot(ndvi_aug13_maui_only,
+     main = "NDVI — August 13 (Post-Fire) with Fire Detections (Aug 10)",
+     col = viridis::viridis(100))
+
+plot(st_geometry(maui_districts_utm),
+     add = TRUE,
+     border = "black",
+     lwd = 1)
+
+plot(st_geometry(fires_10_utm),
+     add = TRUE,
+     col = "red",
+     pch = 16,
+     cex = 0.7)
+```
+
+```{r}
+lahaina_poly <- maui_districts[maui_districts$district %in% c("West Maui Residency Area"), ]
+upcountry_poly <- maui_districts[maui_districts$district %in% c("Upcountry (Pukalani-Kula-Ulupalakua) Residency Area"), ]
+
+lahaina_poly_utm   <- st_transform(lahaina_poly, crs(ndvi_aug8_maui_only))
+upcountry_poly_utm <- st_transform(upcountry_poly, crs(ndvi_aug8_maui_only))
+
+#fix invalid geometries
+lahaina_poly_utm <- st_make_valid(lahaina_poly_utm)
+upcountry_poly_utm <- st_make_valid(upcountry_poly_utm)
+
+#convert to SpatVector
+lahaina_vect   <- vect(lahaina_poly_utm)
+upcountry_vect <- vect(upcountry_poly_utm)
+
+plot(ndvi_aug8_maui_only, main="NDVI Maui with Districts Overlay")
+plot(lahaina_vect, add=TRUE, border="red", lwd=2)
+plot(upcountry_vect, add=TRUE, border="purple", lwd=2)
+```
+
+```{r}
+plot(ndvi_aug8_lahaina, main="Lahaina: Aug 8 (Pre-Fire)", col=viridis(100))
+plot(lahaina_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_aug13_lahaina, main="Lahaina: Aug 13 (Post-Fire)", col=viridis(100))
+plot(lahaina_vect, add=TRUE, border="black", lwd=1)
+```
+
+```{r}
+plot(ndvi_aug8_upcountry, main="Upcountry: Aug 8 (Pre-Fire)", col=viridis(100))
+plot(upcountry_vect, add=TRUE, border="black", lwd=1)
+
+plot(ndvi_aug13_upcountry, main="Upcountry: Aug 13 (Post-Fire)", col=viridis(100))
+plot(upcountry_vect, add=TRUE, border="black", lwd=1)
+```
+
+```{r}
+fires_08 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-08"))
+
+fires_08_utm <- fires_08 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug8_maui_only))
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+plot(ndvi_aug8_maui_only,
+     main = "NDVI — August 8 (Pre-Fire) with Fire Detections (Aug 8)",
+     col = viridis::viridis(100))
+
+# 5. Draw district outlines
+plot(st_geometry(maui_districts_utm),
+     add = TRUE,
+     border = "black",
+     lwd = 1)
+
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                     "West Maui Residency Area", ]
+
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                       "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+plot(st_geometry(lahaina_poly), add = TRUE,
+     col = adjustcolor("purple", alpha.f = 0.35),
+     border = "purple", lwd = 2)
+
+plot(st_geometry(upcountry_poly), add = TRUE,
+     col = adjustcolor("blue", alpha.f = 0.35),
+     border = "blue", lwd = 2)
+
+# 6. Fire points
+plot(st_geometry(fires_08_utm),
+     add = TRUE,
+     col = "red",
+     pch = 16,
+     cex = 0.7)
+
+
+
+fires_10 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-10"))
+
+
+fires_10_utm <- fires_10 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug13_maui_only))
+
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug13_maui_only))
+
+plot(ndvi_aug13_maui_only,
+     main = "NDVI — August 13 (Post-Fire) with Fire Detections (Aug 10)",
+     col = viridis::viridis(100))
+
+
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                     "West Maui Residency Area", ]
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                       "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+plot(st_geometry(lahaina_poly), add = TRUE,
+     col = adjustcolor("purple", alpha.f = 0.35),
+     border = "purple", lwd = 2)
+
+plot(st_geometry(upcountry_poly), add = TRUE,
+     col = adjustcolor("blue", alpha.f = 0.35),
+     border = "blue", lwd = 2)
+
+# 6. Fire points
+plot(st_geometry(fires_10_utm),
+     add = TRUE,
+     col = "red",
+     pch = 16,
+     cex = 0.7)
+
+```
+
+```{r}
+fires_08 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-08"))
+
+fires_08_utm <- fires_08 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug8_maui_only))
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+plot(ndvi_aug8_maui_only,
+     main = "NDVI — August 8 (Pre-Fire) with Fire Detections and Districts",
+     col = viridis::viridis(100))
+
+plot(st_geometry(maui_districts_utm),
+     add = TRUE,
+     border = "black",
+     lwd = 1)
+
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                     "West Maui Residency Area", ]
+
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                       "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+plot(st_geometry(lahaina_poly), add = TRUE,
+     col = adjustcolor("purple", alpha.f = 0.35),
+     border = "purple", lwd = 2)
+
+plot(st_geometry(upcountry_poly), add = TRUE,
+     col = adjustcolor("blue", alpha.f = 0.35),
+     border = "blue", lwd = 2)
+
+```
+
+```{r}
+fires_10 <- fires %>% filter(ACQ_DATE == as.Date("2023-08-10"))
+
+fires_10_utm <- fires_10 %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs(ndvi_aug13_maui_only))
+
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug13_maui_only))
+
+plot(ndvi_aug13_maui_only,
+     main = "NDVI with Maui Districts",
+     col = viridis::viridis(100))
+
+plot(st_geometry(maui_districts_utm), add = TRUE, border = "black", lwd = 1)
+
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                     "West Maui Residency Area", ]
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district ==
+                                       "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+plot(st_geometry(lahaina_poly), add = TRUE,
+     col = adjustcolor("purple", alpha.f = 0.35),
+     border = "purple", lwd = 2)
+
+plot(st_geometry(upcountry_poly), add = TRUE,
+     col = adjustcolor("blue", alpha.f = 0.35),
+     border = "blue", lwd = 2)
+
+```
+
+```{r}
+maui_only_ext <- ext(734500, 819500, 2281500, 2328500)
+ndvi_aug13_crop <- crop(ndvi_aug13_maui, maui_only_ext)
+```
+
+```{r}
+crop_poly <- as.polygons(maui_only_ext) |> st_as_sf()
+st_crs(crop_poly) <- st_crs(ndvi_aug13_maui_only)
+```
+
+```{r}
+maui_districts_utm <- st_transform(maui_districts, st_crs(ndvi_aug13_maui_only))
+
+maui_districts_crop <- st_intersection(maui_districts_utm, crop_poly)
+
+lahaina_poly     <- maui_districts_crop[maui_districts_crop$district ==
+                                          "West Maui Residency Area", ]
+
+upcountry_poly   <- maui_districts_crop[maui_districts_crop$district ==
+                                          "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+other_districts  <- maui_districts_crop[
+  !(maui_districts_crop$district %in% c(
+      "West Maui Residency Area",
+      "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area"
+  )), ]
+
+```
+
+```{r}
+fires_all <- fires %>%
+  filter(ACQ_DATE %in% as.Date(c("2023-08-08","2023-08-09","2023-08-10"))) %>%
+  st_as_sf(coords = c("longitude","latitude"), crs = 4326) %>%
+  st_transform(st_crs(ndvi_aug13_maui_only))
+
+fires_all_crop <- st_intersection(fires_all, crop_poly)
+```
+
+```{r}
+ndvi_df <- as.data.frame(ndvi_aug13_maui_only, xy = TRUE)
+names(ndvi_df)[3] <- "ndvi"
+
+p <- ggplot() +
+  geom_raster(data = ndvi_df, aes(x = x, y = y, fill = ndvi)) +
+  scale_fill_viridis_c(name = "NDVI") +
+
+  geom_sf(data = other_districts, fill = NA, color = "black", linewidth = 0.5) +
+  geom_sf(data = lahaina_poly,   fill = scales::alpha("purple", 0.3),   color = "purple",   linewidth = 1) +
+  geom_sf(data = upcountry_poly, fill = scales::alpha("blue", 0.3), color = "blue", linewidth = 1) +
+
+  geom_sf(data = fires_all_crop, color = "red", size = 2, alpha = 0.9) +
+
+  labs(title = "Fire Progression — {frame_time}") +
+  theme_minimal() +
+  coord_sf(expand = FALSE) +
+  transition_time(ACQ_DATE) +
+  ease_aes("linear")
+
+anim <- gganimate::animate(p, fps = 5)
+anim
+
+```
+
+```{r}
+library(gganimate)
+anim_save("maui_fire_animation.gif", animation = anim)
+```
+
+```{r}
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+landcover <- st_read("Maui_land_cover_map_2017_v1.2_Shapefile/Maui_land_cover_map_2017_v1.2_Shapefile.shp")
+landcover_utm <- st_transform(landcover, crs(ndvi_aug8_maui_only))
+landcover_vect <- vect(landcover_utm)
+```
+
+```{r}
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district == "West Maui Residency Area", ]
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district == "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+lahaina_vect <- vect(lahaina_poly)
+upcountry_vect <- vect(upcountry_poly)
+```
+
+```{r}
+ndvi_diff <- ndvi_aug13_maui_only - ndvi_aug8_maui_only
+```
+
+```{r}
+ndvi_diff_lahaina   <- mask(crop(ndvi_diff, lahaina_vect), lahaina_vect)
+ndvi_diff_upcountry <- mask(crop(ndvi_diff, upcountry_vect), upcountry_vect)
+```
+
+```{r}
+lc_lahaina   <- mask(crop(landcover_vect, lahaina_vect), lahaina_vect)
+lc_upcountry <- mask(crop(landcover_vect, upcountry_vect), upcountry_vect)
+```
+
+```{r}
+loss_lahaina <- terra::extract(ndvi_diff_lahaina, lc_lahaina, fun = mean, na.rm = TRUE)
+loss_upcountry <- terra::extract(ndvi_diff_upcountry, lc_upcountry, fun = mean, na.rm = TRUE)
+```
+
+```{r}
+loss_lahaina$landcover <- lc_lahaina$LC_2017
+loss_upcountry$landcover <- lc_upcountry$LC_2017
+
+loss_lahaina$area <- "Lahaina"
+loss_upcountry$area <- "Upcountry"
+```
+
+```{r}
+ndvi_lc_loss <- rbind(loss_lahaina, loss_upcountry)
+names(ndvi_lc_loss)[1] <- "mean_NDVI_loss"
+```
+
+```{r}
+
+ndvi_lc_loss <- ndvi_lc_loss %>%
+  rename(landcover = T04QGJ_20230813T210931_B8A_20m)
+
+ndvi_lc_summary <- ndvi_lc_loss %>%
+  group_by(area, landcover) %>%
+  summarise(mean_NDVI_loss = mean(mean_NDVI_loss, na.rm = TRUE), .groups = "drop")
+
+ndvi_lc_summary
+
+```
+
+```{r}
+library(dplyr)
+ndvi_lc_loss <- ndvi_lc_loss %>%
+  rename(landcover = T04QGJ_20230813T210931_B8A_20m)
+
+ndvi_lc_summary <- ndvi_lc_loss %>%
+  group_by(area, landcover) %>%
+  summarise(mean_NDVI_loss = mean(mean_NDVI_loss, na.rm = TRUE), .groups = "drop")
+
+ndvi_lc_summary
+
+```
+
+```{r}
+maui_districts <- st_read("Maui_County_Council_Districts/Maui_County_Council_Districts.shp")
+maui_districts_utm <- st_transform(maui_districts, crs(ndvi_aug8_maui_only))
+
+landcover <- st_read("Maui_land_cover_map_2017_v1.2_Shapefile/Maui_land_cover_map_2017_v1.2_Shapefile.shp")
+landcover_utm <- st_transform(landcover, crs(ndvi_aug8_maui_only))
+landcover_vect <- vect(landcover_utm)
+```
+
+```{r}
+lahaina_poly <- maui_districts_utm[maui_districts_utm$district == "West Maui Residency Area", ]
+upcountry_poly <- maui_districts_utm[maui_districts_utm$district == "Upcountry (Pukalani-Kula-Ulupalakua) Residency Area", ]
+
+lahaina_vect <- vect(lahaina_poly)
+upcountry_vect <- vect(upcountry_poly)
+```
+
+```{r}
+ndvi_diff <- ndvi_aug13_maui_only - ndvi_aug8_maui_only
+```
+
+```{r}
+ndvi_diff_lahaina   <- mask(crop(ndvi_diff, lahaina_vect), lahaina_vect)
+ndvi_diff_upcountry <- mask(crop(ndvi_diff, upcountry_vect), upcountry_vect)
+```
+
+```{r}
+lc_lahaina   <- mask(crop(landcover_vect, lahaina_vect), lahaina_vect)
+lc_upcountry <- mask(crop(landcover_vect, upcountry_vect), upcountry_vect)
+```
+
+```{r}
+loss_lahaina <- terra::extract(ndvi_diff_lahaina, lc_lahaina, fun = mean, na.rm = TRUE)
+loss_upcountry <- terra::extract(ndvi_diff_upcountry, lc_upcountry, fun = mean, na.rm = TRUE)
+```
+
+```{r}
+loss_lahaina$landcover <- lc_lahaina$LC_2017
+loss_upcountry$landcover <- lc_upcountry$LC_2017
+
+loss_lahaina$area <- "Lahaina"
+loss_upcountry$area <- "Upcountry"
+```
+
+```{r}
+ndvi_lc_loss <- rbind(loss_lahaina, loss_upcountry)
+names(ndvi_lc_loss)[1] <- "mean_NDVI_loss"
+```
+
+```{r}
+l <- ggplot(
+  ndvi_lc_loss[ndvi_lc_loss$area == "Lahaina", ],
+  aes(x = landcover, y = mean_NDVI_loss)
+) +
+  geom_col(fill = "purple") +   # single color
+  coord_flip() +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +  # no sci notation
+  labs(
+    title = "NDVI Change by Land-Cover Type (Lahaina)",
+    x = "Land-Cover Class (LC_2017)",
+    y = "ΔNDVI"
+  ) +
+  theme_minimal()
+
+l + theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+ggplot(
+  ndvi_lc_loss[ndvi_lc_loss$area == "Lahaina", ],
+  aes(x = landcover, y = mean_NDVI_loss)
+) +
+  geom_col(fill = "purple") +   # single color
+  coord_flip() +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +  # no sci notation
+  labs(
+    title = "NDVI Change by Land-Cover Type — Lahaina",
+    x = "Land-Cover Class (LC_2017)",
+    y = "ΔNDVI"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+u <- ggplot(
+  ndvi_lc_loss[ndvi_lc_loss$area == "Upcountry", ],
+  aes(x = landcover, y = mean_NDVI_loss)
+) +
+  geom_col(fill = "blue") +   # single color
+  coord_flip() +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +  # no sci notation
+  labs(
+    title = "NDVI Change by Land-Cover Type (Upcountry)",
+    x = "Land-Cover Class (LC_2017)",
+    y = "ΔNDVI"
+  ) +
+  theme_minimal()
+
+u + theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+ggplot(
+  ndvi_lc_loss[ndvi_lc_loss$area == "Upcountry", ],
+  aes(x = landcover, y = mean_NDVI_loss)
+) +
+  geom_col(fill = "blue") +   # single color
+  coord_flip() +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +  # no sci notation
+  labs(
+    title = "NDVI Change by Land-Cover Type — Upcountry",
+    x = "Land-Cover Class (LC_2017)",
+    y = "ΔNDVI"
+  ) +
+  theme_minimal()
+```
